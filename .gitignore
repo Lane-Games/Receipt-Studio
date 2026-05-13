@@ -1,0 +1,9 @@
+.venv/
+build/
+dist/
+release/
+__pycache__/
+*.pyc
+*.pyo
+*.spec
+receipt_studio/exports/
