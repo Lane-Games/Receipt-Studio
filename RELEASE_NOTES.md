@@ -1,4 +1,4 @@
-# Prop Receipt Studio v1.0.0
+# Prop Receipt Studio v1.0.1
 
 Windows desktop app for creating visibly marked prop receipt images for film and layout work.
 
@@ -15,5 +15,8 @@ Windows desktop app for creating visibly marked prop receipt images for film and
 - Real asset-backed logo, wood, paper, and grime rendering.
 - Torn/worn paper edges, soft lighting, shadows, fullscreen preview, and 4K scene export.
 - Receipt size slider for background/fullscreen/4K renders.
+- Quick draw editor for scribbles, pen marks, highlighter, undo, and clear ink.
+- Clean receipt edges with subtle bend distortion instead of ripped corners.
+- Single realistic shadow layer in the background scene render.
 
 Generated receipts include a `PROP RECEIPT - NOT VALID` label.

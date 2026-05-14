@@ -493,7 +493,7 @@ class ReceiptRenderer:
     ) -> Image.Image:
         pad_x = 180
         pad_y = 110
-        receipt_layer = receipt.convert("RGBA").rotate(
+        receipt_layer = self._bend_receipt_layer(receipt.convert("RGBA")).rotate(
             -1.15,
             expand=True,
             resample=Image.Resampling.BICUBIC,
@@ -513,18 +513,28 @@ class ReceiptRenderer:
         y = (height - receipt_layer.height) // 2 if center_receipt else pad_y
         alpha = receipt_layer.getchannel("A")
 
-        broad_shadow = Image.new("RGBA", receipt_layer.size, (0, 0, 0, 0))
-        broad_shadow.putalpha(alpha.point(lambda p: int(p * 0.26)))
-        broad_shadow = broad_shadow.filter(ImageFilter.GaussianBlur(34))
-        self._alpha_composite_clipped(table, broad_shadow, (x + 34, y + 42))
-
-        contact_shadow = Image.new("RGBA", receipt_layer.size, (0, 0, 0, 0))
-        contact_shadow.putalpha(alpha.point(lambda p: int(p * 0.18)))
-        contact_shadow = contact_shadow.filter(ImageFilter.GaussianBlur(8))
-        self._alpha_composite_clipped(table, contact_shadow, (x + 8, y + 12))
+        shadow = Image.new("RGBA", receipt_layer.size, (0, 0, 0, 0))
+        shadow.putalpha(alpha.point(lambda p: int(p * 0.30)))
+        shadow = shadow.filter(ImageFilter.GaussianBlur(24))
+        self._alpha_composite_clipped(table, shadow, (x + 24, y + 30))
 
         self._alpha_composite_clipped(table, receipt_layer, (x, y))
         return self._vignette(table)
+
+    def _bend_receipt_layer(self, image: Image.Image) -> Image.Image:
+        width, height = image.size
+        max_shift = max(2, int(width * 0.018))
+        canvas = Image.new("RGBA", (width + max_shift * 2, height), (0, 0, 0, 0))
+        for y in range(height):
+            t = y / max(1, height - 1)
+            shift = (
+                math.sin(t * math.pi * 2.1) * max_shift
+                + math.sin(t * math.pi * 5.2 + 0.7) * (max_shift * 0.35)
+                + (t - 0.5) * max_shift * 0.35
+            )
+            row = image.crop((0, y, width, y + 1))
+            canvas.alpha_composite(row, (max_shift + int(round(shift)), y))
+        return canvas
 
     def _alpha_composite_clipped(self, dest: Image.Image, src: Image.Image, xy: tuple[int, int]) -> None:
         x, y = xy
@@ -716,50 +726,16 @@ class ReceiptRenderer:
         mask = Image.new("L", (width, height), 0)
         draw = ImageDraw.Draw(mask)
         points: list[tuple[int, int]] = []
-        for x in range(0, width + 1, 18):
-            points.append((x, rng.randint(0, 18)))
-        for y in range(18, height + 1, 28):
-            points.append((width - rng.randint(0, 8), y))
-        for x in range(width, -1, -18):
-            points.append((x, height - rng.randint(0, 18)))
-        for y in range(height, -1, -28):
-            points.append((rng.randint(0, 8), y))
+        for x in range(0, width + 1, 28):
+            points.append((x, rng.randint(0, 3)))
+        for y in range(28, height + 1, 38):
+            points.append((width - rng.randint(0, 3), y))
+        for x in range(width, -1, -28):
+            points.append((x, height - rng.randint(0, 3)))
+        for y in range(height, -1, -38):
+            points.append((rng.randint(0, 3), y))
         draw.polygon(points, fill=255)
-
-        corner_bites = [
-            ((0, 0), 62, 38),
-            ((width, 0), 54, 34),
-            ((0, height), 46, 32),
-            ((width, height), 68, 42),
-        ]
-        for (cx, cy), max_w, max_h in corner_bites:
-            sx = -1 if cx == width else 1
-            sy = -1 if cy == height else 1
-            for _ in range(3):
-                bite_w = rng.randint(max_w // 2, max_w)
-                bite_h = rng.randint(max_h // 2, max_h)
-                jitter_x = rng.randint(0, 20) * sx
-                jitter_y = rng.randint(0, 20) * sy
-                polygon = [
-                    (cx + jitter_x, cy + jitter_y),
-                    (cx + sx * bite_w, cy + jitter_y + sy * rng.randint(0, 12)),
-                    (cx + jitter_x + sx * rng.randint(0, 14), cy + sy * bite_h),
-                ]
-                draw.polygon(polygon, fill=0)
-
-        for _ in range(16):
-            edge = rng.choice(["top", "bottom", "left", "right"])
-            if edge in {"top", "bottom"}:
-                x = rng.randint(0, width)
-                y = 0 if edge == "top" else height
-                radius = rng.randint(4, 13)
-                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=0)
-            else:
-                x = 0 if edge == "left" else width
-                y = rng.randint(0, height)
-                radius = rng.randint(3, 9)
-                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=0)
-        return mask.filter(ImageFilter.GaussianBlur(0.25))
+        return mask.filter(ImageFilter.GaussianBlur(0.35))
 
     def _vignette(self, image: Image.Image) -> Image.Image:
         width, height = image.size
@@ -987,6 +963,7 @@ class ReceiptStudioApp(tk.Tk):
 
         self.renderer = ReceiptRenderer()
         self.items: list[ReceiptItem] = []
+        self.draw_strokes: list[dict[str, Any]] = []
         self.preview_photo: ImageTk.PhotoImage | None = None
         self.current_receipt: Image.Image | None = None
         self.current_scene: Image.Image | None = None
@@ -997,6 +974,8 @@ class ReceiptStudioApp(tk.Tk):
         self.background_var = tk.StringVar(value="Light wood table")
         self.scene_scale_var = tk.DoubleVar(value=100.0)
         self.scene_scale_label_var = tk.StringVar(value="100%")
+        self.draw_color_var = tk.StringVar(value="Black")
+        self.draw_size_var = tk.DoubleVar(value=5.0)
         self.taxable_var = tk.BooleanVar(value=True)
 
         self._build_style()
@@ -1047,6 +1026,8 @@ class ReceiptStudioApp(tk.Tk):
         ttk.Button(toolbar, text="Save PNG", command=self._save_png).pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Save 4K Scene", command=self._save_4k_scene).pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Fullscreen", command=self._fullscreen_preview).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Draw", command=self._open_draw_editor).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Clear Ink", command=self._clear_draw_strokes).pack(side="left", padx=(8, 0))
         ttk.Label(toolbar, text="Background").pack(side="left", padx=(18, 6))
         background = ttk.Combobox(
             toolbar,
@@ -1391,11 +1372,170 @@ class ReceiptStudioApp(tk.Tk):
             Image.Resampling.LANCZOS,
         )
 
+    def _draw_rgba(self, color_name: str) -> tuple[int, int, int, int]:
+        colors = {
+            "Black": (10, 10, 10, 230),
+            "Red": (190, 28, 28, 220),
+            "Blue": (24, 74, 180, 220),
+            "Highlighter": (255, 224, 60, 118),
+        }
+        return colors.get(color_name, colors["Black"])
+
+    def _apply_draw_strokes(self, receipt: Image.Image) -> Image.Image:
+        if not self.draw_strokes:
+            return receipt
+        result = receipt.convert("RGBA")
+        overlay = Image.new("RGBA", result.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay, "RGBA")
+        for stroke in self.draw_strokes:
+            points = stroke.get("points") or []
+            if len(points) < 2:
+                continue
+            color = tuple(stroke.get("rgba") or self._draw_rgba("Black"))
+            width = max(1, int(stroke.get("width", 5)))
+            draw.line([tuple(point) for point in points], fill=color, width=width, joint="curve")
+            radius = max(1, width // 2)
+            for x, y in points:
+                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+        result.alpha_composite(overlay)
+        return result
+
+    def _clear_draw_strokes(self) -> None:
+        if self.draw_strokes and not messagebox.askyesno(APP_TITLE, "Clear all drawing on the receipt?"):
+            return
+        self.draw_strokes.clear()
+        self._queue_refresh(20)
+
+    def _open_draw_editor(self) -> None:
+        base_receipt = self.renderer.render_receipt(self._form_data(), self.items)
+        receipt = self._apply_draw_strokes(base_receipt)
+
+        top = tk.Toplevel(self)
+        top.title("Draw on Receipt")
+        top.geometry("760x820")
+        top.minsize(520, 520)
+        top.columnconfigure(0, weight=1)
+        top.rowconfigure(1, weight=1)
+
+        toolbar = ttk.Frame(top, padding=8)
+        toolbar.grid(row=0, column=0, sticky="ew")
+        ttk.Label(toolbar, text="Color").pack(side="left")
+        color_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self.draw_color_var,
+            values=["Black", "Red", "Blue", "Highlighter"],
+            state="readonly",
+            width=12,
+        )
+        color_combo.pack(side="left", padx=(6, 12))
+        ttk.Label(toolbar, text="Brush").pack(side="left")
+        ttk.Scale(toolbar, from_=2, to=28, variable=self.draw_size_var, length=110).pack(side="left", padx=(6, 12))
+        ttk.Button(toolbar, text="Undo", command=lambda: undo()).pack(side="left", padx=(0, 8))
+        ttk.Button(toolbar, text="Clear", command=lambda: clear()).pack(side="left", padx=(0, 8))
+        ttk.Button(toolbar, text="Done", command=lambda: done()).pack(side="right")
+
+        canvas = tk.Canvas(top, bg="#2f2f2f", highlightthickness=0)
+        canvas.grid(row=1, column=0, sticky="nsew")
+
+        state: dict[str, Any] = {"photo": None, "scale": 1.0, "offset": (0, 0), "points": [], "canvas_line": None}
+
+        def canvas_to_receipt(event: tk.Event) -> tuple[int, int]:
+            ox, oy = state["offset"]
+            scale = state["scale"]
+            x = int((event.x - ox) / scale)
+            y = int((event.y - oy) / scale)
+            return max(0, min(receipt.width - 1, x)), max(0, min(receipt.height - 1, y))
+
+        def redraw() -> None:
+            canvas.delete("all")
+            cw = max(canvas.winfo_width(), 300)
+            ch = max(canvas.winfo_height(), 300)
+            scale = min((cw - 30) / receipt.width, (ch - 30) / receipt.height, 1.6)
+            scale = max(0.15, scale)
+            display = self._apply_draw_strokes(base_receipt)
+            display = display.resize((max(1, int(display.width * scale)), max(1, int(display.height * scale))), Image.Resampling.LANCZOS)
+            state["photo"] = ImageTk.PhotoImage(display)
+            state["scale"] = scale
+            state["offset"] = ((cw - display.width) // 2, (ch - display.height) // 2)
+            canvas.create_image(*state["offset"], image=state["photo"], anchor="nw")
+
+        def start(event: tk.Event) -> None:
+            point = canvas_to_receipt(event)
+            state["points"] = [point]
+
+        def drag(event: tk.Event) -> None:
+            point = canvas_to_receipt(event)
+            points = state["points"]
+            if not points:
+                points.append(point)
+            elif point != points[-1]:
+                points.append(point)
+            redraw()
+            if len(points) >= 2:
+                ox, oy = state["offset"]
+                scale = state["scale"]
+                coords: list[float] = []
+                for x, y in points:
+                    coords.extend([ox + x * scale, oy + y * scale])
+                canvas.create_line(
+                    *coords,
+                    fill=self._tk_draw_color(self.draw_color_var.get()),
+                    width=max(1, float(self.draw_size_var.get()) * scale),
+                    capstyle=tk.ROUND,
+                    joinstyle=tk.ROUND,
+                    smooth=True,
+                )
+
+        def finish(_event: tk.Event) -> None:
+            points = state["points"]
+            if len(points) >= 2:
+                self.draw_strokes.append(
+                    {
+                        "points": points[:],
+                        "rgba": self._draw_rgba(self.draw_color_var.get()),
+                        "width": int(round(float(self.draw_size_var.get()))),
+                    }
+                )
+            state["points"] = []
+            redraw()
+            self._queue_refresh(20)
+
+        def undo() -> None:
+            if self.draw_strokes:
+                self.draw_strokes.pop()
+                redraw()
+                self._queue_refresh(20)
+
+        def clear() -> None:
+            self.draw_strokes.clear()
+            redraw()
+            self._queue_refresh(20)
+
+        def done() -> None:
+            self._queue_refresh(20)
+            top.destroy()
+
+        canvas.bind("<Configure>", lambda _event: redraw())
+        canvas.bind("<ButtonPress-1>", start)
+        canvas.bind("<B1-Motion>", drag)
+        canvas.bind("<ButtonRelease-1>", finish)
+        top.protocol("WM_DELETE_WINDOW", done)
+        top.after(80, redraw)
+
+    def _tk_draw_color(self, color_name: str) -> str:
+        colors = {
+            "Black": "#111111",
+            "Red": "#be1c1c",
+            "Blue": "#184ab4",
+            "Highlighter": "#ffe03c",
+        }
+        return colors.get(color_name, "#111111")
+
     def _refresh_preview(self) -> None:
         self.refresh_job = None
         self._refresh_items_tree()
         data = self._form_data()
-        self.current_receipt = self.renderer.render_receipt(data, self.items)
+        self.current_receipt = self._apply_draw_strokes(self.renderer.render_receipt(data, self.items))
         viewport = (max(self.preview_canvas.winfo_width(), 900), max(self.preview_canvas.winfo_height(), 700))
         scaled = self._scaled_receipt_for_scene(self.current_receipt, *viewport)
         self.current_scene = self.renderer.compose_scene(
