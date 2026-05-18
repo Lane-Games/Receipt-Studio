@@ -490,11 +490,18 @@ class ReceiptRenderer:
         viewport: tuple[int, int] | None = None,
         center_receipt: bool = False,
         fixed_viewport: bool = False,
+        angle: float = -1.15,
+        perspective: float = 6.0,
+        bend: float = 18.0,
     ) -> Image.Image:
         pad_x = 180
         pad_y = 110
-        receipt_layer = self._bend_receipt_layer(receipt.convert("RGBA")).rotate(
-            -1.15,
+        receipt_layer = self._camera_warp_receipt_layer(
+            receipt.convert("RGBA"),
+            perspective=perspective,
+            bend=bend,
+        ).rotate(
+            angle,
             expand=True,
             resample=Image.Resampling.BICUBIC,
             fillcolor=(0, 0, 0, 0),
@@ -511,29 +518,112 @@ class ReceiptRenderer:
 
         x = (width - receipt_layer.width) // 2
         y = (height - receipt_layer.height) // 2 if center_receipt else pad_y
-        alpha = receipt_layer.getchannel("A")
-
-        shadow = Image.new("RGBA", receipt_layer.size, (0, 0, 0, 0))
-        shadow.putalpha(alpha.point(lambda p: int(p * 0.30)))
-        shadow = shadow.filter(ImageFilter.GaussianBlur(24))
-        self._alpha_composite_clipped(table, shadow, (x + 24, y + 30))
+        shadow = self._receipt_shadow(receipt_layer)
+        self._alpha_composite_clipped(table, shadow, (x - 46, y - 34))
 
         self._alpha_composite_clipped(table, receipt_layer, (x, y))
         return self._vignette(table)
 
-    def _bend_receipt_layer(self, image: Image.Image) -> Image.Image:
+    def _camera_warp_receipt_layer(self, image: Image.Image, perspective: float, bend: float) -> Image.Image:
         width, height = image.size
-        max_shift = max(2, int(width * 0.018))
-        canvas = Image.new("RGBA", (width + max_shift * 2, height), (0, 0, 0, 0))
+        if width <= 2 or height <= 2:
+            return image
+
+        perspective = max(0.0, min(45.0, float(perspective))) / 100.0
+        bend = max(0.0, min(55.0, float(bend))) / 100.0
+        scale_factor = 3
+        hires = image.resize((width * scale_factor, height * scale_factor), Image.Resampling.LANCZOS)
+        sw, sh = hires.size
+        margin = max(36, int(sw * (0.05 + bend * 0.10 + perspective * 0.08)))
+        out_w = sw + margin * 2
+        out_h = sh
+        center_x = out_w / 2.0
+        source_center_x = sw / 2.0
+        strip_h = max(16, min(42, sh // 36))
+        max_shift = sw * (0.010 + bend * 0.045)
+        pitch = perspective * 0.18
+
+        def shift_at(t: float) -> float:
+            return (
+                math.sin(t * math.pi * 1.65 + 0.35) * max_shift
+                + math.sin(t * math.pi * 4.10 + 1.10) * (max_shift * 0.22)
+                + (t - 0.5) * max_shift * 0.55
+            )
+
+        def width_scale_at(t: float) -> float:
+            return max(0.74, 1.0 + (t - 0.5) * pitch + math.sin(t * math.pi) * bend * 0.025)
+
+        mesh: list[tuple[tuple[int, int, int, int], tuple[float, float, float, float, float, float, float, float]]] = []
+        for y0 in range(0, out_h, strip_h):
+            y1 = min(out_h, y0 + strip_h)
+            t0 = y0 / max(1, out_h - 1)
+            t1 = y1 / max(1, out_h - 1)
+            shift0 = shift_at(t0)
+            shift1 = shift_at(t1)
+            scale0 = width_scale_at(t0)
+            scale1 = width_scale_at(t1)
+            sx0_left = (0 - center_x - shift0) / scale0 + source_center_x
+            sx0_right = (out_w - center_x - shift0) / scale0 + source_center_x
+            sx1_left = (0 - center_x - shift1) / scale1 + source_center_x
+            sx1_right = (out_w - center_x - shift1) / scale1 + source_center_x
+            mesh.append(
+                (
+                    (0, y0, out_w, y1),
+                    (sx0_left, y0, sx1_left, y1, sx1_right, y1, sx0_right, y0),
+                )
+            )
+
+        warped = hires.transform(
+            (out_w, out_h),
+            Image.Transform.MESH,
+            mesh,
+            resample=Image.Resampling.BICUBIC,
+            fillcolor=(0, 0, 0, 0),
+        )
+        warped = self._add_paper_bend_lighting(warped, strength=bend)
+        return warped.resize((max(1, out_w // scale_factor), max(1, out_h // scale_factor)), Image.Resampling.LANCZOS)
+
+    def _add_paper_bend_lighting(self, image: Image.Image, strength: float) -> Image.Image:
+        if strength <= 0:
+            return image
+        width, height = image.size
+        alpha = image.getchannel("A")
+        shade = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(shade, "RGBA")
+        intensity = max(4, min(18, int(10 + strength * 22)))
+        for y in range(0, height, 3):
+            t = y / max(1, height - 1)
+            wave = math.sin(t * math.pi * 2.0 + 0.4) + math.sin(t * math.pi * 5.1 + 1.7) * 0.35
+            if wave >= 0:
+                fill = (255, 255, 255, int(wave * intensity))
+            else:
+                fill = (0, 0, 0, int(abs(wave) * intensity * 0.75))
+            draw.rectangle((0, y, width, min(height, y + 2)), fill=fill)
+        shade.putalpha(ImageChops.multiply(shade.getchannel("A"), alpha))
+        return Image.alpha_composite(image, shade)
+
+    def _receipt_shadow(self, receipt_layer: Image.Image) -> Image.Image:
+        alpha = receipt_layer.getchannel("A")
+        width, height = receipt_layer.size
+        canvas = Image.new("RGBA", (width + 110, height + 96), (0, 0, 0, 0))
+
+        cast_alpha = alpha.point(lambda p: int(p * 0.09)).filter(ImageFilter.GaussianBlur(34))
+        falloff = Image.new("L", cast_alpha.size, 0)
+        draw_falloff = ImageDraw.Draw(falloff)
         for y in range(height):
             t = y / max(1, height - 1)
-            shift = (
-                math.sin(t * math.pi * 2.1) * max_shift
-                + math.sin(t * math.pi * 5.2 + 0.7) * (max_shift * 0.35)
-                + (t - 0.5) * max_shift * 0.35
-            )
-            row = image.crop((0, y, width, y + 1))
-            canvas.alpha_composite(row, (max_shift + int(round(shift)), y))
+            value = int(130 + 90 * t)
+            draw_falloff.line((0, y, width, y), fill=value)
+        cast_alpha = ImageChops.multiply(cast_alpha, falloff)
+        cast = Image.new("RGBA", cast_alpha.size, (0, 0, 0, 0))
+        cast.putalpha(cast_alpha)
+        canvas.alpha_composite(cast, (70, 60))
+
+        edge_alpha = ImageChops.subtract(alpha.filter(ImageFilter.GaussianBlur(7)), alpha.filter(ImageFilter.MinFilter(7)))
+        edge_alpha = edge_alpha.point(lambda p: min(70, int(p * 0.55))).filter(ImageFilter.GaussianBlur(4))
+        contact = Image.new("RGBA", edge_alpha.size, (0, 0, 0, 0))
+        contact.putalpha(edge_alpha)
+        canvas.alpha_composite(contact, (48, 38))
         return canvas
 
     def _alpha_composite_clipped(self, dest: Image.Image, src: Image.Image, xy: tuple[int, int]) -> None:
@@ -983,6 +1073,9 @@ class ReceiptStudioApp(tk.Tk):
         self.grain_var = tk.DoubleVar(value=18.0)
         self.vignette_var = tk.DoubleVar(value=28.0)
         self.softness_var = tk.DoubleVar(value=0.25)
+        self.scene_angle_var = tk.DoubleVar(value=-1.2)
+        self.scene_perspective_var = tk.DoubleVar(value=6.0)
+        self.scene_bend_var = tk.DoubleVar(value=18.0)
         self.taxable_var = tk.BooleanVar(value=True)
 
         self._build_style()
@@ -1231,6 +1324,39 @@ class ReceiptStudioApp(tk.Tk):
             self._on_camera_slider_changed(var, value_label, suffix, refresh=False)
             row += 1
 
+        ttk.Separator(frame).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 8))
+        row += 1
+        ttk.Label(frame, text="Receipt angle").grid(row=row, column=0, sticky="w")
+        self.scene_angle_label = tk.StringVar()
+        ttk.Scale(
+            frame,
+            from_=-12,
+            to=12,
+            variable=self.scene_angle_var,
+            command=lambda value: self._on_scene_geometry_changed(self.scene_angle_var, self.scene_angle_label, "deg"),
+        ).grid(row=row, column=1, sticky="ew", pady=4)
+        ttk.Label(frame, textvariable=self.scene_angle_label, width=7).grid(row=row, column=2, sticky="e", padx=(8, 0))
+        self._on_scene_geometry_changed(self.scene_angle_var, self.scene_angle_label, "deg", refresh=False)
+        row += 1
+
+        for label, var in [
+            ("Perspective", self.scene_perspective_var),
+            ("Paper bend", self.scene_bend_var),
+        ]:
+            value_label = tk.StringVar()
+            setattr(self, f"scene_{label.lower().replace(' ', '_')}_label", value_label)
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
+            ttk.Scale(
+                frame,
+                from_=0,
+                to=45,
+                variable=var,
+                command=lambda _value, v=var, target=value_label: self._on_scene_geometry_changed(v, target, "%"),
+            ).grid(row=row, column=1, sticky="ew", pady=4)
+            ttk.Label(frame, textvariable=value_label, width=7).grid(row=row, column=2, sticky="e", padx=(8, 0))
+            self._on_scene_geometry_changed(var, value_label, "%", refresh=False)
+            row += 1
+
         buttons = ttk.Frame(frame)
         buttons.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         ttk.Button(buttons, text="Apply mode", command=self._apply_camera_preset).pack(side="left")
@@ -1306,6 +1432,7 @@ class ReceiptStudioApp(tk.Tk):
                 "vignette": round(float(self.vignette_var.get()), 2),
                 "softness": round(float(self.softness_var.get()), 2),
             },
+            "scene_geometry": self._scene_geometry_options(),
             **{key: var.get().strip() for key, var in self.vars.items()},
         }
 
@@ -1431,6 +1558,18 @@ class ReceiptStudioApp(tk.Tk):
         if refresh:
             self._queue_refresh(60)
 
+    def _on_scene_geometry_changed(self, var: tk.DoubleVar, label_var: tk.StringVar, suffix: str, refresh: bool = True) -> None:
+        try:
+            value = float(var.get())
+        except (tk.TclError, ValueError):
+            value = 0.0
+        if suffix == "deg":
+            label_var.set(f"{value:.1f}deg")
+        else:
+            label_var.set(f"{int(round(value))}%")
+        if refresh:
+            self._queue_refresh(60)
+
     def _apply_camera_preset(self) -> None:
         self._set_camera_values(self.camera_mode_var.get())
 
@@ -1463,6 +1602,13 @@ class ReceiptStudioApp(tk.Tk):
             if isinstance(label_var, tk.StringVar):
                 self._on_camera_slider_changed(var, label_var, suffix, refresh=False)
         self._queue_refresh(20)
+
+    def _scene_geometry_options(self) -> dict[str, float]:
+        return {
+            "angle": float(self.scene_angle_var.get()),
+            "perspective": float(self.scene_perspective_var.get()),
+            "bend": float(self.scene_bend_var.get()),
+        }
 
     def _on_scene_scale_changed(self, value: str) -> None:
         try:
@@ -1737,12 +1883,14 @@ class ReceiptStudioApp(tk.Tk):
         self.current_receipt = self._apply_draw_strokes(self.renderer.render_receipt(data, self.items))
         viewport = (max(self.preview_canvas.winfo_width(), 900), max(self.preview_canvas.winfo_height(), 700))
         scaled = self._scaled_receipt_for_scene(self.current_receipt, *viewport)
+        geometry = self._scene_geometry_options()
         self.current_scene = self.renderer.compose_scene(
             scaled,
             self.background_var.get(),
             viewport=viewport,
             center_receipt=True,
             fixed_viewport=True,
+            **geometry,
         )
         self.current_scene = self._apply_camera_effects(self.current_scene)
         self.preview_photo = ImageTk.PhotoImage(self.current_scene)
@@ -1773,12 +1921,14 @@ class ReceiptStudioApp(tk.Tk):
             self._refresh_preview()
         assert self.current_receipt is not None
         scaled = self._scaled_receipt_for_scene(self.current_receipt, width, height)
+        geometry = self._scene_geometry_options()
         scene = self.renderer.compose_scene(
             scaled,
             self.background_var.get(),
             viewport=(width, height),
             center_receipt=True,
             fixed_viewport=True,
+            **geometry,
         )
         return self._apply_camera_effects(scene)
 
@@ -1817,12 +1967,14 @@ class ReceiptStudioApp(tk.Tk):
             receipt = self.current_receipt
             assert receipt is not None
             scaled = self._scaled_receipt_for_scene(receipt, w, h)
+            geometry = self._scene_geometry_options()
             scene = self.renderer.compose_scene(
                 scaled,
                 self.background_var.get(),
                 viewport=(w, h),
                 center_receipt=True,
                 fixed_viewport=True,
+                **geometry,
             )
             scene = self._apply_camera_effects(scene)
             photo_holder["photo"] = ImageTk.PhotoImage(scene)
