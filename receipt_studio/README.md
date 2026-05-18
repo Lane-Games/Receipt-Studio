@@ -8,7 +8,7 @@ Desktop app for creating visibly marked prop receipt mockups for film, testing, 
 - Item entry with UPC/SKU, description, quantity, price, category, and taxable flag.
 - Automatic subtotal, tax, and total calculation.
 - JSON import box plus a built-in AI prompt for structured autofill data.
-- Asset-backed paper, wood, grime, and logo rendering, receipt-size control, quick draw marks, camera modes, PNG export, fullscreen preview, and 4K scene export.
+- Asset-backed paper, wood, grime, and logo rendering, receipt-size control, quick draw marks, camera modes, anti-aliased bend/perspective controls, PNG export, fullscreen preview, and 4K scene export.
 
 Every generated receipt includes a visible `PROP / NOT VALID` label and is not an official proof of purchase.
 
