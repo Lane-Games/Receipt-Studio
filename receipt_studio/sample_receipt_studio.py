@@ -976,6 +976,13 @@ class ReceiptStudioApp(tk.Tk):
         self.scene_scale_label_var = tk.StringVar(value="100%")
         self.draw_color_var = tk.StringVar(value="Black")
         self.draw_size_var = tk.DoubleVar(value=5.0)
+        self.camera_mode_var = tk.StringVar(value="Natural Phone")
+        self.exposure_var = tk.DoubleVar(value=0.0)
+        self.contrast_var = tk.DoubleVar(value=108.0)
+        self.warmth_var = tk.DoubleVar(value=8.0)
+        self.grain_var = tk.DoubleVar(value=18.0)
+        self.vignette_var = tk.DoubleVar(value=28.0)
+        self.softness_var = tk.DoubleVar(value=0.25)
         self.taxable_var = tk.BooleanVar(value=True)
 
         self._build_style()
@@ -1013,6 +1020,7 @@ class ReceiptStudioApp(tk.Tk):
         self._build_receipt_tab(notebook)
         self._build_items_tab(notebook)
         self._build_import_tab(notebook)
+        self._build_camera_tab(notebook)
         self._build_export_tab(notebook)
 
         right = ttk.Frame(self, padding=(0, 10, 10, 10))
@@ -1182,6 +1190,57 @@ class ReceiptStudioApp(tk.Tk):
         self.json_text.grid(row=4, column=0, sticky="nsew", pady=(3, 8))
         ttk.Button(frame, text="Import JSON into fields", command=self._import_json).grid(row=5, column=0, sticky="ew")
 
+    def _build_camera_tab(self, notebook: ttk.Notebook) -> None:
+        frame = ttk.Frame(notebook, padding=12)
+        notebook.add(frame, text="Camera")
+        frame.columnconfigure(1, weight=1)
+
+        row = 0
+        ttk.Label(frame, text="Camera mode").grid(row=row, column=0, sticky="w")
+        mode = ttk.Combobox(
+            frame,
+            textvariable=self.camera_mode_var,
+            values=["Natural Phone", "Warm Film", "Low Light", "Flash", "Security Cam", "Clean"],
+            state="readonly",
+            width=22,
+        )
+        mode.grid(row=row, column=1, sticky="ew", pady=3)
+        mode.bind("<<ComboboxSelected>>", lambda _event: self._apply_camera_preset())
+        row += 1
+
+        for label, var, start, end, suffix in [
+            ("Exposure", self.exposure_var, -45, 45, ""),
+            ("Contrast", self.contrast_var, 70, 145, "%"),
+            ("Warmth", self.warmth_var, -45, 45, ""),
+            ("Grain", self.grain_var, 0, 75, "%"),
+            ("Vignette", self.vignette_var, 0, 80, "%"),
+            ("Softness", self.softness_var, 0, 2.0, "px"),
+        ]:
+            value_label = tk.StringVar()
+            setattr(self, f"camera_{label.lower()}_label", value_label)
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
+            scale = ttk.Scale(
+                frame,
+                from_=start,
+                to=end,
+                variable=var,
+                command=lambda _value, v=var, s=suffix, target=value_label: self._on_camera_slider_changed(v, target, s),
+            )
+            scale.grid(row=row, column=1, sticky="ew", pady=4)
+            ttk.Label(frame, textvariable=value_label, width=7).grid(row=row, column=2, sticky="e", padx=(8, 0))
+            self._on_camera_slider_changed(var, value_label, suffix, refresh=False)
+            row += 1
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        ttk.Button(buttons, text="Apply mode", command=self._apply_camera_preset).pack(side="left")
+        ttk.Button(buttons, text="Reset clean", command=lambda: self._set_camera_values("Clean")).pack(side="left", padx=(8, 0))
+        ttk.Label(
+            frame,
+            text="Camera effects apply to the background preview, fullscreen, and 4K scene export.",
+            wraplength=310,
+        ).grid(row=row + 1, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+
     def _build_export_tab(self, notebook: ttk.Notebook) -> None:
         frame = ttk.Frame(notebook, padding=12)
         notebook.add(frame, text="Export")
@@ -1238,6 +1297,15 @@ class ReceiptStudioApp(tk.Tk):
             "store": self.store_var.get(),
             "background": self.background_var.get(),
             "scene_scale_percent": round(float(self.scene_scale_var.get()), 1),
+            "camera_mode": self.camera_mode_var.get(),
+            "camera": {
+                "exposure": round(float(self.exposure_var.get()), 2),
+                "contrast": round(float(self.contrast_var.get()), 2),
+                "warmth": round(float(self.warmth_var.get()), 2),
+                "grain": round(float(self.grain_var.get()), 2),
+                "vignette": round(float(self.vignette_var.get()), 2),
+                "softness": round(float(self.softness_var.get()), 2),
+            },
             **{key: var.get().strip() for key, var in self.vars.items()},
         }
 
@@ -1349,6 +1417,53 @@ class ReceiptStudioApp(tk.Tk):
             self.after_cancel(self.refresh_job)
         self.refresh_job = self.after(delay, self._refresh_preview)
 
+    def _on_camera_slider_changed(self, var: tk.DoubleVar, label_var: tk.StringVar, suffix: str, refresh: bool = True) -> None:
+        try:
+            value = float(var.get())
+        except (tk.TclError, ValueError):
+            value = 0.0
+        if suffix == "px":
+            label_var.set(f"{value:.1f}px")
+        elif suffix == "%":
+            label_var.set(f"{int(round(value))}%")
+        else:
+            label_var.set(f"{int(round(value))}")
+        if refresh:
+            self._queue_refresh(60)
+
+    def _apply_camera_preset(self) -> None:
+        self._set_camera_values(self.camera_mode_var.get())
+
+    def _set_camera_values(self, mode: str) -> None:
+        presets = {
+            "Natural Phone": (0, 108, 8, 18, 28, 0.25),
+            "Warm Film": (4, 118, 24, 42, 38, 0.45),
+            "Low Light": (-12, 112, 12, 55, 48, 0.65),
+            "Flash": (14, 122, -6, 12, 18, 0.12),
+            "Security Cam": (-8, 132, -22, 35, 42, 0.85),
+            "Clean": (0, 100, 0, 0, 0, 0),
+        }
+        exposure, contrast, warmth, grain, vignette, softness = presets.get(mode, presets["Natural Phone"])
+        self.camera_mode_var.set(mode)
+        self.exposure_var.set(exposure)
+        self.contrast_var.set(contrast)
+        self.warmth_var.set(warmth)
+        self.grain_var.set(grain)
+        self.vignette_var.set(vignette)
+        self.softness_var.set(softness)
+        for attr, var, suffix in [
+            ("camera_exposure_label", self.exposure_var, ""),
+            ("camera_contrast_label", self.contrast_var, "%"),
+            ("camera_warmth_label", self.warmth_var, ""),
+            ("camera_grain_label", self.grain_var, "%"),
+            ("camera_vignette_label", self.vignette_var, "%"),
+            ("camera_softness_label", self.softness_var, "px"),
+        ]:
+            label_var = getattr(self, attr, None)
+            if isinstance(label_var, tk.StringVar):
+                self._on_camera_slider_changed(var, label_var, suffix, refresh=False)
+        self._queue_refresh(20)
+
     def _on_scene_scale_changed(self, value: str) -> None:
         try:
             scale = float(value)
@@ -1371,6 +1486,90 @@ class ReceiptStudioApp(tk.Tk):
             (max(1, int(receipt.width * scale)), max(1, int(receipt.height * scale))),
             Image.Resampling.LANCZOS,
         )
+
+    def _camera_options(self) -> dict[str, float | str]:
+        return {
+            "mode": self.camera_mode_var.get(),
+            "exposure": float(self.exposure_var.get()),
+            "contrast": float(self.contrast_var.get()),
+            "warmth": float(self.warmth_var.get()),
+            "grain": float(self.grain_var.get()),
+            "vignette": float(self.vignette_var.get()),
+            "softness": float(self.softness_var.get()),
+        }
+
+    def _apply_camera_effects(self, image: Image.Image) -> Image.Image:
+        options = self._camera_options()
+        result = image.convert("RGBA")
+
+        softness = max(0.0, float(options["softness"]))
+        if softness > 0:
+            result = result.filter(ImageFilter.GaussianBlur(radius=softness))
+
+        exposure = max(-60.0, min(60.0, float(options["exposure"])))
+        brightness = 1.0 + exposure / 100.0
+        result = ImageEnhance.Brightness(result).enhance(max(0.25, brightness))
+
+        contrast = max(50.0, min(170.0, float(options["contrast"]))) / 100.0
+        result = ImageEnhance.Contrast(result).enhance(contrast)
+
+        warmth = max(-60.0, min(60.0, float(options["warmth"])))
+        if abs(warmth) > 0.1:
+            r, g, b, a = result.split()
+            if warmth > 0:
+                r = r.point(lambda p: min(255, int(p * (1 + warmth / 220.0) + warmth * 0.18)))
+                b = b.point(lambda p: max(0, int(p * (1 - warmth / 300.0))))
+            else:
+                cool = abs(warmth)
+                b = b.point(lambda p: min(255, int(p * (1 + cool / 220.0) + cool * 0.18)))
+                r = r.point(lambda p: max(0, int(p * (1 - cool / 300.0))))
+            result = Image.merge("RGBA", (r, g, b, a))
+
+        grain = max(0.0, min(100.0, float(options["grain"])))
+        if grain > 0:
+            seed = stable_seed(f"{options['mode']}:{result.size}:{grain}:{exposure}:{warmth}")
+            rng = random.Random(seed)
+            noise = Image.effect_noise(result.size, 18 + grain * 0.75).convert("L")
+            if rng.random() > 0.5:
+                noise = ImageOps.mirror(noise)
+            noise_rgb = Image.merge("RGBA", (noise, noise, noise, Image.new("L", result.size, int(255 * min(0.18, grain / 520.0)))))
+            result = Image.alpha_composite(result, noise_rgb)
+
+        vignette = max(0.0, min(100.0, float(options["vignette"])))
+        if vignette > 0:
+            result = self._camera_vignette(result, vignette)
+
+        mode = str(options["mode"])
+        if mode == "Security Cam":
+            gray = ImageOps.grayscale(result).convert("RGBA")
+            blue = Image.new("RGBA", result.size, (175, 198, 205, 32))
+            gray.alpha_composite(blue)
+            result = gray
+        elif mode == "Flash":
+            result = ImageEnhance.Sharpness(result).enhance(1.18)
+
+        return result
+
+    def _camera_vignette(self, image: Image.Image, strength: float) -> Image.Image:
+        width, height = image.size
+        small_w, small_h = 240, 320
+        mask = Image.new("L", (small_w, small_h), 0)
+        px = mask.load()
+        cx = (small_w - 1) / 2
+        cy = (small_h - 1) / 2
+        for yy in range(small_h):
+            for xx in range(small_w):
+                dx = (xx - cx) / cx
+                dy = (yy - cy) / cy
+                distance = math.sqrt(dx * dx + dy * dy)
+                alpha = int(max(0.0, min(1.0, (distance - 0.42) / 0.72)) ** 1.7 * strength * 1.45)
+                px[xx, yy] = max(0, min(170, alpha))
+        mask = mask.resize((width, height), Image.Resampling.BICUBIC)
+        overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        overlay.putalpha(mask)
+        result = image.copy()
+        result.alpha_composite(overlay)
+        return result
 
     def _draw_rgba(self, color_name: str) -> tuple[int, int, int, int]:
         colors = {
@@ -1545,6 +1744,7 @@ class ReceiptStudioApp(tk.Tk):
             center_receipt=True,
             fixed_viewport=True,
         )
+        self.current_scene = self._apply_camera_effects(self.current_scene)
         self.preview_photo = ImageTk.PhotoImage(self.current_scene)
         self.preview_canvas.delete("all")
         self.preview_canvas.create_image(0, 0, image=self.preview_photo, anchor="nw")
@@ -1573,13 +1773,14 @@ class ReceiptStudioApp(tk.Tk):
             self._refresh_preview()
         assert self.current_receipt is not None
         scaled = self._scaled_receipt_for_scene(self.current_receipt, width, height)
-        return self.renderer.compose_scene(
+        scene = self.renderer.compose_scene(
             scaled,
             self.background_var.get(),
             viewport=(width, height),
             center_receipt=True,
             fixed_viewport=True,
         )
+        return self._apply_camera_effects(scene)
 
     def _save_4k_scene(self) -> None:
         OUTPUT_DIR.mkdir(exist_ok=True)
@@ -1623,6 +1824,7 @@ class ReceiptStudioApp(tk.Tk):
                 center_receipt=True,
                 fixed_viewport=True,
             )
+            scene = self._apply_camera_effects(scene)
             photo_holder["photo"] = ImageTk.PhotoImage(scene)
             canvas.delete("all")
             canvas.create_image(0, 0, image=photo_holder["photo"], anchor="nw")
