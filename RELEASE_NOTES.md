@@ -1,4 +1,4 @@
-# Prop Receipt Studio v1.0.3
+# Prop Receipt Studio v1.1
 
 Windows desktop app for creating visibly marked prop receipt images for film and layout work.
 
@@ -23,5 +23,11 @@ Windows desktop app for creating visibly marked prop receipt images for film and
 - Supersampled anti-aliased receipt bend/perspective warp to remove scanline-looking bend pixels.
 - Receipt angle, perspective, and bend controls for more natural phone-camera framing.
 - Rebuilt alpha-mask shadow rendering to remove the old rectangular box-shadow artifact.
+- Scene randomizer for background, lighting, camera effects, receipt angle, bend, and blur.
+- New extra background image assets and background blur slider.
+- Optional extended hand overlay with 500% max size, rotation, X/Y controls, and preview dragging.
+- Randomize Scene no longer changes hand placement or visibility.
+- Printable A4 black-and-white sheet builder with recent receipts and bulk layout.
+- Print now saves A4 PNG pages and uses Windows Paint printing so missing PDF associations do not block printing.
 
 Generated receipts include a `PROP RECEIPT - NOT VALID` label.
