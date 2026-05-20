@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,7 +30,16 @@ else:
     ROOT_DIR = Path(__file__).resolve().parent
     RESOURCE_DIR = ROOT_DIR
 OUTPUT_DIR = ROOT_DIR / "exports"
-ASSET_DIRS = [RESOURCE_DIR / "assets", ROOT_DIR / "assets", Path("C:/Users/turnn/Downloads/Assets")]
+ASSET_DIRS = [
+    RESOURCE_DIR / "assets",
+    RESOURCE_DIR / "assets" / "new",
+    ROOT_DIR / "assets",
+    ROOT_DIR / "assets" / "new",
+    Path("C:/Users/turnn/Downloads/Assets"),
+    Path("C:/Users/turnn/Downloads/Assets/new"),
+]
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".avif", ".bmp"}
+A4_PRINT_SIZE = (2480, 3508)
 
 
 STORE_TEMPLATES: dict[str, dict[str, Any]] = {
@@ -236,6 +248,8 @@ class ReceiptRenderer:
                 "cvs": self._load_asset("CVS.png") or self._make_cvs_logo(),
                 "costco": self._load_asset("Costco.png") or self._make_costco_logo(),
             },
+            "backgrounds": self._load_background_assets(),
+            "hand": self._load_asset("Extended hand.png") or self._load_asset("PlaceableHAnd.png"),
         }
 
     def _load_asset(self, name: str) -> Image.Image | None:
@@ -247,6 +261,44 @@ class ReceiptRenderer:
                 except OSError:
                     continue
         return None
+
+    def _load_background_assets(self) -> dict[str, Image.Image]:
+        backgrounds: dict[str, Image.Image] = {}
+        skip_names = {
+            "woodbg.png",
+            "papertexture.png",
+            "transparentgrime.png",
+            "target.png",
+            "walmart.png",
+            "cvs.png",
+            "costco.png",
+            "placeablehand.png",
+            "extended hand.png",
+        }
+        for directory in ASSET_DIRS:
+            if not directory.exists():
+                continue
+            for path in directory.iterdir():
+                if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+                    continue
+                if path.name.lower() in skip_names:
+                    continue
+                label = path.stem.replace("_", " ").replace("-", " ").strip().title()
+                label = " ".join(label.split())
+                if label in backgrounds:
+                    continue
+                try:
+                    backgrounds[label] = Image.open(path).convert("RGBA")
+                except OSError:
+                    continue
+        return backgrounds
+
+    def background_choices(self) -> list[str]:
+        choices = ["Light wood table", "Dark wood table", "Stone counter", "Plain studio"]
+        backgrounds = self.assets.get("backgrounds")
+        if isinstance(backgrounds, dict):
+            choices.extend(sorted(backgrounds))
+        return choices
 
     def _make_wood_texture(self) -> Image.Image:
         width, height = 2048, 1152
@@ -493,6 +545,12 @@ class ReceiptRenderer:
         angle: float = -1.15,
         perspective: float = 6.0,
         bend: float = 18.0,
+        background_blur: float = 0.0,
+        hand_enabled: bool = False,
+        hand_scale: float = 55.0,
+        hand_rotation: float = -12.0,
+        hand_x: float = 72.0,
+        hand_y: float = 70.0,
     ) -> Image.Image:
         pad_x = 180
         pad_y = 110
@@ -514,7 +572,10 @@ class ReceiptRenderer:
             if viewport:
                 width = max(width, viewport[0])
                 height = max(height, viewport[1])
-        table = self._table_texture(width, height, background)
+        table = self._table_texture_for_camera(width, height, background, angle=angle)
+        blur_radius = max(0.0, min(10.0, float(background_blur)))
+        if blur_radius > 0.05:
+            table = table.filter(ImageFilter.GaussianBlur(blur_radius))
 
         x = (width - receipt_layer.width) // 2
         y = (height - receipt_layer.height) // 2 if center_receipt else pad_y
@@ -522,6 +583,8 @@ class ReceiptRenderer:
         self._alpha_composite_clipped(table, shadow, (x - 46, y - 34))
 
         self._alpha_composite_clipped(table, receipt_layer, (x, y))
+        if hand_enabled:
+            self._composite_hand(table, hand_scale, hand_rotation, hand_x, hand_y)
         return self._vignette(table)
 
     def _camera_warp_receipt_layer(self, image: Image.Image, perspective: float, bend: float) -> Image.Image:
@@ -626,6 +689,53 @@ class ReceiptRenderer:
         canvas.alpha_composite(contact, (48, 38))
         return canvas
 
+    def _composite_hand(self, scene: Image.Image, scale_percent: float, rotation: float, x_percent: float, y_percent: float) -> None:
+        hand = self.assets.get("hand")
+        if not isinstance(hand, Image.Image):
+            return
+        rotated, x, y = self._hand_layer_and_position(scene.size, scale_percent, rotation, x_percent, y_percent)
+        if rotated is None:
+            return
+        self._alpha_composite_clipped(scene, rotated, (x, y))
+
+    def _hand_layer_and_position(
+        self,
+        scene_size: tuple[int, int],
+        scale_percent: float,
+        rotation: float,
+        x_percent: float,
+        y_percent: float,
+    ) -> tuple[Image.Image | None, int, int]:
+        hand = self.assets.get("hand")
+        if not isinstance(hand, Image.Image):
+            return None, 0, 0
+        scene_w, scene_h = scene_size
+        scale = max(0.05, min(5.0, float(scale_percent) / 100.0))
+        target_w = max(1, int(scene_w * 0.32 * scale))
+        resized = hand.resize((target_w, max(1, int(hand.height * target_w / hand.width))), Image.Resampling.LANCZOS)
+        rotated = resized.rotate(
+            float(rotation),
+            expand=True,
+            resample=Image.Resampling.BICUBIC,
+            fillcolor=(0, 0, 0, 0),
+        )
+        x = int((max(0.0, min(100.0, float(x_percent))) / 100.0) * scene_w - rotated.width / 2)
+        y = int((max(0.0, min(100.0, float(y_percent))) / 100.0) * scene_h - rotated.height / 2)
+        return rotated, x, y
+
+    def hand_bounds(
+        self,
+        scene_size: tuple[int, int],
+        scale_percent: float,
+        rotation: float,
+        x_percent: float,
+        y_percent: float,
+    ) -> tuple[int, int, int, int] | None:
+        layer, x, y = self._hand_layer_and_position(scene_size, scale_percent, rotation, x_percent, y_percent)
+        if layer is None:
+            return None
+        return (x, y, x + layer.width, y + layer.height)
+
     def _alpha_composite_clipped(self, dest: Image.Image, src: Image.Image, xy: tuple[int, int]) -> None:
         x, y = xy
         src_left = max(0, -x)
@@ -652,15 +762,21 @@ class ReceiptRenderer:
         noise = Image.effect_noise((width, height), 5).convert("L")
         noise_rgba = Image.merge("RGBA", (noise, noise, noise, Image.new("L", (width, height), 10)))
         base = Image.alpha_composite(base.convert("RGBA"), noise_rgba)
-        draw = ImageDraw.Draw(base, "RGBA")
-
-        for _ in range(7):
+        folds = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        fold_draw = ImageDraw.Draw(folds, "RGBA")
+        for _ in range(5):
             x1 = rng.randint(-30, width - 50)
             y1 = rng.randint(0, height)
-            x2 = x1 + rng.randint(110, 340)
-            y2 = y1 + rng.randint(-90, 90)
-            draw.line((x1, y1, x2, y2), fill=(96, 96, 90, rng.randint(7, 15)), width=rng.randint(1, 2))
-            draw.line((x1 + 3, y1 + 2, x2 + 3, y2 + 2), fill=(255, 255, 255, rng.randint(10, 18)), width=1)
+            x2 = x1 + rng.randint(140, 380)
+            y2 = y1 + rng.randint(-70, 70)
+            line_width = rng.randint(6, 16)
+            fold_draw.line((x1, y1, x2, y2), fill=(80, 80, 74, rng.randint(5, 9)), width=line_width)
+            fold_draw.line(
+                (x1 + line_width // 2, y1 + 3, x2 + line_width // 2, y2 + 3),
+                fill=(255, 255, 255, rng.randint(5, 10)),
+                width=max(2, line_width // 3),
+            )
+        base.alpha_composite(folds.filter(ImageFilter.GaussianBlur(4.5)))
 
         grime_asset = self.assets.get("grime")
         if isinstance(grime_asset, Image.Image):
@@ -675,7 +791,29 @@ class ReceiptRenderer:
         return base
 
     def _table_texture(self, width: int, height: int, style: str) -> Image.Image:
+        return self._table_texture_for_camera(width, height, style, angle=0.0)
+
+    def _table_texture_for_camera(self, width: int, height: int, style: str, angle: float) -> Image.Image:
+        overscan = max(80, int(max(width, height) * 0.08))
+        image = self._raw_table_texture(width + overscan * 2, height + overscan * 2, style)
+        angle = max(-14.0, min(14.0, float(angle))) * 0.35
+        if abs(angle) > 0.05:
+            image = image.rotate(
+                angle,
+                expand=False,
+                resample=Image.Resampling.BICUBIC,
+                fillcolor=(0, 0, 0, 0),
+            )
+        left = max(0, (image.width - width) // 2)
+        top = max(0, (image.height - height) // 2)
+        return image.crop((left, top, left + width, top + height))
+
+    def _raw_table_texture(self, width: int, height: int, style: str) -> Image.Image:
         style_key = style.lower()
+        backgrounds = self.assets.get("backgrounds")
+        if isinstance(backgrounds, dict) and isinstance(backgrounds.get(style), Image.Image):
+            image = self._fit_cover(backgrounds[style], width, height)
+            return self._scene_light(ImageEnhance.Contrast(image).enhance(1.04))
         wood_asset = self.assets.get("wood")
         if isinstance(wood_asset, Image.Image) and ("wood" in style_key or "table" in style_key):
             image = self._fit_cover(wood_asset, width, height)
@@ -1054,6 +1192,7 @@ class ReceiptStudioApp(tk.Tk):
         self.renderer = ReceiptRenderer()
         self.items: list[ReceiptItem] = []
         self.draw_strokes: list[dict[str, Any]] = []
+        self.recent_receipts: list[dict[str, Any]] = []
         self.preview_photo: ImageTk.PhotoImage | None = None
         self.current_receipt: Image.Image | None = None
         self.current_scene: Image.Image | None = None
@@ -1076,10 +1215,20 @@ class ReceiptStudioApp(tk.Tk):
         self.scene_angle_var = tk.DoubleVar(value=-1.2)
         self.scene_perspective_var = tk.DoubleVar(value=6.0)
         self.scene_bend_var = tk.DoubleVar(value=18.0)
+        self.background_blur_var = tk.DoubleVar(value=0.0)
+        self.background_blur_label_var = tk.StringVar(value="0.0px")
+        self.hand_enabled_var = tk.BooleanVar(value=False)
+        self.hand_scale_var = tk.DoubleVar(value=55.0)
+        self.hand_rotation_var = tk.DoubleVar(value=-12.0)
+        self.hand_x_var = tk.DoubleVar(value=72.0)
+        self.hand_y_var = tk.DoubleVar(value=70.0)
+        self.drag_hand_var = tk.BooleanVar(value=False)
+        self.hand_drag_active = False
         self.taxable_var = tk.BooleanVar(value=True)
 
         self._build_style()
         self._build_ui()
+        self._load_recent_from_exports()
         self._load_template_defaults("target", preserve_items=False)
         self._load_demo_items()
         self._queue_refresh()
@@ -1115,6 +1264,7 @@ class ReceiptStudioApp(tk.Tk):
         self._build_import_tab(notebook)
         self._build_camera_tab(notebook)
         self._build_export_tab(notebook)
+        self._build_print_tab(notebook)
 
         right = ttk.Frame(self, padding=(0, 10, 10, 10))
         right.grid(row=0, column=1, sticky="nsew")
@@ -1129,11 +1279,13 @@ class ReceiptStudioApp(tk.Tk):
         ttk.Button(toolbar, text="Fullscreen", command=self._fullscreen_preview).pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Draw", command=self._open_draw_editor).pack(side="left", padx=(8, 0))
         ttk.Button(toolbar, text="Clear Ink", command=self._clear_draw_strokes).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Randomize Scene", command=self._randomize_scene).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(toolbar, text="Drag Hand", variable=self.drag_hand_var, command=self._on_drag_hand_toggled).pack(side="left", padx=(8, 0))
         ttk.Label(toolbar, text="Background").pack(side="left", padx=(18, 6))
         background = ttk.Combobox(
             toolbar,
             textvariable=self.background_var,
-            values=["Light wood table", "Dark wood table", "Stone counter", "Plain studio"],
+            values=self.renderer.background_choices(),
             state="readonly",
             width=18,
         )
@@ -1163,6 +1315,9 @@ class ReceiptStudioApp(tk.Tk):
         vscroll.grid(row=0, column=1, sticky="ns")
         hscroll.grid(row=1, column=0, sticky="ew")
         self.preview_canvas.bind("<Configure>", lambda _event: self._queue_refresh(350))
+        self.preview_canvas.bind("<ButtonPress-1>", self._on_preview_mouse_down, add="+")
+        self.preview_canvas.bind("<B1-Motion>", self._on_preview_mouse_drag, add="+")
+        self.preview_canvas.bind("<ButtonRelease-1>", self._on_preview_mouse_up, add="+")
 
     def _build_receipt_tab(self, notebook: ttk.Notebook) -> None:
         frame = ttk.Frame(notebook, padding=12)
@@ -1324,6 +1479,17 @@ class ReceiptStudioApp(tk.Tk):
             self._on_camera_slider_changed(var, value_label, suffix, refresh=False)
             row += 1
 
+        ttk.Label(frame, text="Background blur").grid(row=row, column=0, sticky="w")
+        ttk.Scale(
+            frame,
+            from_=0,
+            to=8,
+            variable=self.background_blur_var,
+            command=lambda value: self._on_background_blur_changed(value),
+        ).grid(row=row, column=1, sticky="ew", pady=4)
+        ttk.Label(frame, textvariable=self.background_blur_label_var, width=7).grid(row=row, column=2, sticky="e", padx=(8, 0))
+        row += 1
+
         ttk.Separator(frame).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 8))
         row += 1
         ttk.Label(frame, text="Receipt angle").grid(row=row, column=0, sticky="w")
@@ -1357,10 +1523,47 @@ class ReceiptStudioApp(tk.Tk):
             self._on_scene_geometry_changed(var, value_label, "%", refresh=False)
             row += 1
 
+        ttk.Separator(frame).grid(row=row, column=0, columnspan=3, sticky="ew", pady=(10, 8))
+        row += 1
+        ttk.Checkbutton(
+            frame,
+            text="Place hand",
+            variable=self.hand_enabled_var,
+            command=lambda: self._queue_refresh(60),
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        row += 1
+        ttk.Checkbutton(
+            frame,
+            text="Drag hand on preview",
+            variable=self.drag_hand_var,
+            command=self._on_drag_hand_toggled,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        row += 1
+        for label, var, start, end, suffix in [
+            ("Hand size", self.hand_scale_var, 15, 500, "%"),
+            ("Hand rotation", self.hand_rotation_var, -80, 80, "deg"),
+            ("Hand X", self.hand_x_var, 0, 100, "%"),
+            ("Hand Y", self.hand_y_var, 0, 100, "%"),
+        ]:
+            value_label = tk.StringVar()
+            setattr(self, f"hand_{label.lower().replace(' ', '_')}_label", value_label)
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w")
+            ttk.Scale(
+                frame,
+                from_=start,
+                to=end,
+                variable=var,
+                command=lambda _value, v=var, target=value_label, s=suffix: self._on_hand_changed(v, target, s),
+            ).grid(row=row, column=1, sticky="ew", pady=4)
+            ttk.Label(frame, textvariable=value_label, width=7).grid(row=row, column=2, sticky="e", padx=(8, 0))
+            self._on_hand_changed(var, value_label, suffix, refresh=False)
+            row += 1
+
         buttons = ttk.Frame(frame)
         buttons.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(12, 0))
         ttk.Button(buttons, text="Apply mode", command=self._apply_camera_preset).pack(side="left")
         ttk.Button(buttons, text="Reset clean", command=lambda: self._set_camera_values("Clean")).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Randomize scene", command=self._randomize_scene).pack(side="left", padx=(8, 0))
         ttk.Label(
             frame,
             text="Camera effects apply to the background preview, fullscreen, and 4K scene export.",
@@ -1381,6 +1584,203 @@ class ReceiptStudioApp(tk.Tk):
         ttk.Button(frame, text="Save 4K scene PNG", command=self._save_4k_scene).grid(row=2, column=0, sticky="ew", pady=4)
         ttk.Button(frame, text="Open fullscreen preview", command=self._fullscreen_preview).grid(row=3, column=0, sticky="ew", pady=4)
         ttk.Button(frame, text="Copy current data JSON", command=self._copy_current_json).grid(row=4, column=0, sticky="ew", pady=4)
+
+    def _build_print_tab(self, notebook: ttk.Notebook) -> None:
+        frame = ttk.Frame(notebook, padding=12)
+        notebook.add(frame, text="Print")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            frame,
+            text="Choose recent prop receipts and lay them out in black and white at receipt width on A4.",
+            wraplength=310,
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        list_frame = ttk.Frame(frame)
+        list_frame.grid(row=1, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        self.print_listbox = tk.Listbox(list_frame, selectmode="extended", height=9, exportselection=False)
+        print_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.print_listbox.yview)
+        self.print_listbox.configure(yscrollcommand=print_scroll.set)
+        self.print_listbox.grid(row=0, column=0, sticky="nsew")
+        print_scroll.grid(row=0, column=1, sticky="ns")
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(buttons, text="Add current", command=self._add_current_to_recent).pack(side="left")
+        ttk.Button(buttons, text="Remove", command=self._remove_recent_selection).pack(side="left", padx=(8, 0))
+
+        ttk.Button(frame, text="Save printable A4 sheet", command=self._save_printable_a4).grid(row=3, column=0, sticky="ew", pady=(12, 4))
+        ttk.Button(frame, text="Print selected A4 sheet", command=self._print_a4_sheet).grid(row=4, column=0, sticky="ew", pady=4)
+
+    def _load_recent_from_exports(self) -> None:
+        if not hasattr(self, "print_listbox"):
+            return
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        paths = sorted(OUTPUT_DIR.glob("prop_receipt*.png"), key=lambda p: p.stat().st_mtime, reverse=True)[:18]
+        for path in reversed(paths):
+            try:
+                image = Image.open(path).convert("RGBA")
+            except OSError:
+                continue
+            self.recent_receipts.insert(0, {"name": path.stem, "image": image.copy()})
+        self.recent_receipts = self.recent_receipts[:24]
+        self._refresh_recent_list()
+
+    def _refresh_recent_list(self) -> None:
+        if not hasattr(self, "print_listbox"):
+            return
+        self.print_listbox.delete(0, "end")
+        for index, entry in enumerate(self.recent_receipts):
+            image = entry["image"]
+            label = f"{index + 1}. {entry['name']}  ({image.width}x{image.height})"
+            self.print_listbox.insert("end", label)
+
+    def _add_current_to_recent(self) -> None:
+        if self.current_receipt is None:
+            self._refresh_preview()
+        assert self.current_receipt is not None
+        name = f"{self.store_var.get()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.recent_receipts.insert(0, {"name": name, "image": self.current_receipt.copy()})
+        self.recent_receipts = self.recent_receipts[:30]
+        self._refresh_recent_list()
+        if hasattr(self, "print_listbox"):
+            self.print_listbox.selection_clear(0, "end")
+            self.print_listbox.selection_set(0)
+
+    def _remove_recent_selection(self) -> None:
+        for index in sorted(self._recent_selected_indexes(), reverse=True):
+            if 0 <= index < len(self.recent_receipts):
+                del self.recent_receipts[index]
+        self._refresh_recent_list()
+
+    def _recent_selected_indexes(self) -> list[int]:
+        if not hasattr(self, "print_listbox"):
+            return []
+        return [int(index) for index in self.print_listbox.curselection()]
+
+    def _selected_recent_images(self) -> list[Image.Image]:
+        indexes = self._recent_selected_indexes()
+        if not indexes:
+            return []
+        return [self.recent_receipts[index]["image"].copy() for index in indexes if 0 <= index < len(self.recent_receipts)]
+
+    def _receipt_for_print(self, image: Image.Image) -> Image.Image:
+        gray = ImageOps.grayscale(image.convert("RGBA"))
+        gray = ImageOps.autocontrast(gray, cutoff=1)
+        gray = ImageEnhance.Contrast(gray).enhance(1.35)
+        return gray.convert("RGB")
+
+    def _make_print_pages(self, images: list[Image.Image]) -> list[Image.Image]:
+        page_w, page_h = A4_PRINT_SIZE
+        margin = 160
+        gap_x = 120
+        gap_y = 130
+        columns = 2
+        column_w = (page_w - margin * 2 - gap_x) // columns
+        target_receipt_w = min(900, column_w)
+        pages = [Image.new("RGB", A4_PRINT_SIZE, "white")]
+        col = 0
+        y = margin
+        for source in images:
+            receipt = self._receipt_for_print(source)
+            scale = target_receipt_w / receipt.width
+            if receipt.height * scale > page_h - margin * 2:
+                scale = (page_h - margin * 2) / receipt.height
+            rendered = receipt.resize((max(1, int(receipt.width * scale)), max(1, int(receipt.height * scale))), Image.Resampling.LANCZOS)
+            if y + rendered.height > page_h - margin and col < columns - 1:
+                col += 1
+                y = margin
+            if y + rendered.height > page_h - margin:
+                pages.append(Image.new("RGB", A4_PRINT_SIZE, "white"))
+                col = 0
+                y = margin
+            x = margin + col * (column_w + gap_x) + (column_w - rendered.width) // 2
+            pages[-1].paste(rendered, (x, y))
+            y += rendered.height + gap_y
+        return pages
+
+    def _save_printable_a4(self) -> Path | None:
+        images = self._selected_recent_images()
+        if not images:
+            messagebox.showinfo(APP_TITLE, "Select one or more recent receipts first.")
+            return None
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        suggested = OUTPUT_DIR / f"printable_a4_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        filename = filedialog.asksaveasfilename(
+            title="Save printable A4 sheet",
+            defaultextension=".pdf",
+            initialfile=suggested.name,
+            initialdir=str(OUTPUT_DIR),
+            filetypes=[("PDF document", "*.pdf"), ("PNG image", "*.png")],
+        )
+        if not filename:
+            return None
+        pages = self._make_print_pages(images)
+        path = Path(filename)
+        if path.suffix.lower() == ".png":
+            if len(pages) == 1:
+                pages[0].save(path, dpi=(300, 300))
+            else:
+                for index, page in enumerate(pages, start=1):
+                    page_path = path.with_name(f"{path.stem}_page{index}{path.suffix}")
+                    page.save(page_path, dpi=(300, 300))
+        else:
+            pages[0].save(path, "PDF", resolution=300.0, save_all=True, append_images=pages[1:])
+        messagebox.showinfo(APP_TITLE, f"Saved printable A4:\n{path}")
+        return path
+
+    def _print_a4_sheet(self) -> None:
+        images = self._selected_recent_images()
+        if not images:
+            messagebox.showinfo(APP_TITLE, "Select one or more recent receipts first.")
+            return
+        print_dir = OUTPUT_DIR / "print_jobs"
+        print_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pages = self._make_print_pages(images)
+        png_paths = self._save_print_pages_as_png(pages, print_dir, stamp)
+        if self._print_png_pages(png_paths):
+            messagebox.showinfo(APP_TITLE, f"Sent {len(png_paths)} A4 page(s) to Windows print.\n\nSaved at:\n{print_dir}")
+            return
+        try:
+            os.startfile(str(print_dir))
+        except OSError:
+            pass
+        messagebox.showwarning(
+            APP_TITLE,
+            "Windows could not start a printer command automatically.\n\n"
+            f"I saved A4 PNG print page(s) here:\n{print_dir}\n\n"
+            "Open the PNG page and print it at 100% / actual size.",
+        )
+
+    def _save_print_pages_as_png(self, pages: list[Image.Image], print_dir: Path, stamp: str) -> list[Path]:
+        print_dir.mkdir(parents=True, exist_ok=True)
+        paths: list[Path] = []
+        for index, page in enumerate(pages, start=1):
+            suffix = f"_page{index}" if len(pages) > 1 else ""
+            path = print_dir / f"printable_a4_{stamp}{suffix}.png"
+            page.save(path, dpi=(300, 300))
+            paths.append(path)
+        return paths
+
+    def _print_png_pages(self, paths: list[Path]) -> bool:
+        paint = shutil.which("mspaint.exe")
+        if not paint:
+            system_root = Path(os.environ.get("SystemRoot", "C:/Windows"))
+            candidate = system_root / "System32" / "mspaint.exe"
+            if candidate.exists():
+                paint = str(candidate)
+        if not paint:
+            return False
+        try:
+            for path in paths:
+                subprocess.Popen([paint, "/p", str(path)], close_fds=True)
+        except OSError:
+            return False
+        return True
 
     def _on_store_changed(self, _event: Any = None) -> None:
         self._load_template_defaults(self.store_var.get(), preserve_items=True)
@@ -1544,6 +1944,63 @@ class ReceiptStudioApp(tk.Tk):
             self.after_cancel(self.refresh_job)
         self.refresh_job = self.after(delay, self._refresh_preview)
 
+    def _on_drag_hand_toggled(self) -> None:
+        if bool(self.drag_hand_var.get()):
+            self.hand_enabled_var.set(True)
+            self.preview_canvas.configure(cursor="hand2")
+        else:
+            self.hand_drag_active = False
+            self.preview_canvas.configure(cursor="")
+        self._queue_refresh(40)
+
+    def _preview_scene_point(self, event: tk.Event) -> tuple[float, float]:
+        return float(self.preview_canvas.canvasx(event.x)), float(self.preview_canvas.canvasy(event.y))
+
+    def _on_preview_mouse_down(self, event: tk.Event) -> None:
+        if not bool(self.drag_hand_var.get()) or not bool(self.hand_enabled_var.get()) or self.current_scene is None:
+            return
+        sx, sy = self._preview_scene_point(event)
+        bounds = self.renderer.hand_bounds(
+            self.current_scene.size,
+            float(self.hand_scale_var.get()),
+            float(self.hand_rotation_var.get()),
+            float(self.hand_x_var.get()),
+            float(self.hand_y_var.get()),
+        )
+        if bounds is None:
+            return
+        left, top, right, bottom = bounds
+        padding = 28
+        self.hand_drag_active = left - padding <= sx <= right + padding and top - padding <= sy <= bottom + padding
+        if self.hand_drag_active:
+            self._move_hand_to_scene_point(sx, sy)
+
+    def _on_preview_mouse_drag(self, event: tk.Event) -> None:
+        if not self.hand_drag_active or self.current_scene is None:
+            return
+        sx, sy = self._preview_scene_point(event)
+        self._move_hand_to_scene_point(sx, sy)
+
+    def _on_preview_mouse_up(self, _event: tk.Event) -> None:
+        self.hand_drag_active = False
+
+    def _move_hand_to_scene_point(self, sx: float, sy: float) -> None:
+        if self.current_scene is None:
+            return
+        width, height = self.current_scene.size
+        if width <= 0 or height <= 0:
+            return
+        self.hand_x_var.set(max(0.0, min(100.0, sx / width * 100.0)))
+        self.hand_y_var.set(max(0.0, min(100.0, sy / height * 100.0)))
+        for attr, var in [
+            ("hand_hand_x_label", self.hand_x_var),
+            ("hand_hand_y_label", self.hand_y_var),
+        ]:
+            label_var = getattr(self, attr, None)
+            if isinstance(label_var, tk.StringVar):
+                self._on_hand_changed(var, label_var, "%", refresh=False)
+        self._queue_refresh(10)
+
     def _on_camera_slider_changed(self, var: tk.DoubleVar, label_var: tk.StringVar, suffix: str, refresh: bool = True) -> None:
         try:
             value = float(var.get())
@@ -1567,6 +2024,29 @@ class ReceiptStudioApp(tk.Tk):
             label_var.set(f"{value:.1f}deg")
         else:
             label_var.set(f"{int(round(value))}%")
+        if refresh:
+            self._queue_refresh(60)
+
+    def _on_background_blur_changed(self, value: str, refresh: bool = True) -> None:
+        try:
+            blur = float(value)
+        except ValueError:
+            blur = 0.0
+        self.background_blur_label_var.set(f"{blur:.1f}px")
+        if refresh:
+            self._queue_refresh(60)
+
+    def _on_hand_changed(self, var: tk.DoubleVar, label_var: tk.StringVar, suffix: str, refresh: bool = True) -> None:
+        try:
+            value = float(var.get())
+        except (tk.TclError, ValueError):
+            value = 0.0
+        if suffix == "deg":
+            label_var.set(f"{value:.0f}deg")
+        elif suffix == "%":
+            label_var.set(f"{int(round(value))}%")
+        else:
+            label_var.set(f"{value:.1f}")
         if refresh:
             self._queue_refresh(60)
 
@@ -1603,11 +2083,69 @@ class ReceiptStudioApp(tk.Tk):
                 self._on_camera_slider_changed(var, label_var, suffix, refresh=False)
         self._queue_refresh(20)
 
-    def _scene_geometry_options(self) -> dict[str, float]:
+    def _randomize_scene(self) -> None:
+        rng = random.Random()
+        choices = self.renderer.background_choices()
+        if choices:
+            self.background_var.set(rng.choice(choices))
+        mode = rng.choice(["Natural Phone", "Warm Film", "Low Light", "Flash", "Security Cam"])
+        self.camera_mode_var.set(mode)
+        self.exposure_var.set(rng.uniform(-14, 16))
+        self.contrast_var.set(rng.uniform(92, 128))
+        self.warmth_var.set(rng.uniform(-18, 26))
+        self.grain_var.set(rng.uniform(6, 48))
+        self.vignette_var.set(rng.uniform(10, 48))
+        self.softness_var.set(rng.uniform(0.0, 0.85))
+        self.background_blur_var.set(rng.choice([0.0, 0.0, 0.3, 0.6, 1.0, 1.6, 2.4]))
+        self.scene_angle_var.set(rng.uniform(-6.5, 6.5))
+        self.scene_perspective_var.set(rng.uniform(0.0, 18.0))
+        self.scene_bend_var.set(rng.uniform(6.0, 30.0))
+        self._sync_camera_scene_labels()
+        self._queue_refresh(20)
+
+    def _sync_camera_scene_labels(self) -> None:
+        for attr, var, suffix in [
+            ("camera_exposure_label", self.exposure_var, ""),
+            ("camera_contrast_label", self.contrast_var, "%"),
+            ("camera_warmth_label", self.warmth_var, ""),
+            ("camera_grain_label", self.grain_var, "%"),
+            ("camera_vignette_label", self.vignette_var, "%"),
+            ("camera_softness_label", self.softness_var, "px"),
+        ]:
+            label_var = getattr(self, attr, None)
+            if isinstance(label_var, tk.StringVar):
+                self._on_camera_slider_changed(var, label_var, suffix, refresh=False)
+        if hasattr(self, "scene_angle_label"):
+            self._on_scene_geometry_changed(self.scene_angle_var, self.scene_angle_label, "deg", refresh=False)
+        for attr, var in [
+            ("scene_perspective_label", self.scene_perspective_var),
+            ("scene_paper_bend_label", self.scene_bend_var),
+        ]:
+            label_var = getattr(self, attr, None)
+            if isinstance(label_var, tk.StringVar):
+                self._on_scene_geometry_changed(var, label_var, "%", refresh=False)
+        self._on_background_blur_changed(str(self.background_blur_var.get()), refresh=False)
+        for attr, var, suffix in [
+            ("hand_hand_size_label", self.hand_scale_var, "%"),
+            ("hand_hand_rotation_label", self.hand_rotation_var, "deg"),
+            ("hand_hand_x_label", self.hand_x_var, "%"),
+            ("hand_hand_y_label", self.hand_y_var, "%"),
+        ]:
+            label_var = getattr(self, attr, None)
+            if isinstance(label_var, tk.StringVar):
+                self._on_hand_changed(var, label_var, suffix, refresh=False)
+
+    def _scene_geometry_options(self) -> dict[str, Any]:
         return {
             "angle": float(self.scene_angle_var.get()),
             "perspective": float(self.scene_perspective_var.get()),
             "bend": float(self.scene_bend_var.get()),
+            "background_blur": float(self.background_blur_var.get()),
+            "hand_enabled": bool(self.hand_enabled_var.get()),
+            "hand_scale": float(self.hand_scale_var.get()),
+            "hand_rotation": float(self.hand_rotation_var.get()),
+            "hand_x": float(self.hand_x_var.get()),
+            "hand_y": float(self.hand_y_var.get()),
         }
 
     def _on_scene_scale_changed(self, value: str) -> None:
@@ -1719,10 +2257,10 @@ class ReceiptStudioApp(tk.Tk):
 
     def _draw_rgba(self, color_name: str) -> tuple[int, int, int, int]:
         colors = {
-            "Black": (10, 10, 10, 230),
-            "Red": (190, 28, 28, 220),
-            "Blue": (24, 74, 180, 220),
-            "Highlighter": (255, 224, 60, 118),
+            "Black": (10, 10, 10, 255),
+            "Red": (190, 28, 28, 255),
+            "Blue": (24, 74, 180, 255),
+            "Highlighter": (255, 224, 60, 82),
         }
         return colors.get(color_name, colors["Black"])
 
@@ -1730,19 +2268,27 @@ class ReceiptStudioApp(tk.Tk):
         if not self.draw_strokes:
             return receipt
         result = receipt.convert("RGBA")
-        overlay = Image.new("RGBA", result.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay, "RGBA")
         for stroke in self.draw_strokes:
             points = stroke.get("points") or []
             if len(points) < 2:
                 continue
             color = tuple(stroke.get("rgba") or self._draw_rgba("Black"))
+            if len(color) != 4:
+                color = self._draw_rgba("Black")
             width = max(1, int(stroke.get("width", 5)))
-            draw.line([tuple(point) for point in points], fill=color, width=width, joint="curve")
+            mask = Image.new("L", result.size, 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.line([tuple(point) for point in points], fill=255, width=width, joint="curve")
             radius = max(1, width // 2)
             for x, y in points:
-                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
-        result.alpha_composite(overlay)
+                mask_draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=255)
+            if width > 5:
+                mask = mask.filter(ImageFilter.GaussianBlur(0.35))
+            opacity = max(0, min(255, int(color[3])))
+            ink_alpha = mask.point(lambda p, a=opacity: int(p * a / 255))
+            ink = Image.new("RGBA", result.size, (int(color[0]), int(color[1]), int(color[2]), 0))
+            ink.putalpha(ink_alpha)
+            result.alpha_composite(ink)
         return result
 
     def _clear_draw_strokes(self) -> None:
@@ -1829,6 +2375,7 @@ class ReceiptStudioApp(tk.Tk):
                     capstyle=tk.ROUND,
                     joinstyle=tk.ROUND,
                     smooth=True,
+                    stipple=self._tk_draw_stipple(self.draw_color_var.get()),
                 )
 
         def finish(_event: tk.Event) -> None:
@@ -1876,6 +2423,9 @@ class ReceiptStudioApp(tk.Tk):
         }
         return colors.get(color_name, "#111111")
 
+    def _tk_draw_stipple(self, color_name: str) -> str:
+        return "gray50" if color_name == "Highlighter" else ""
+
     def _refresh_preview(self) -> None:
         self.refresh_job = None
         self._refresh_items_tree()
@@ -1914,6 +2464,9 @@ class ReceiptStudioApp(tk.Tk):
             return
         assert self.current_receipt is not None
         self.current_receipt.save(filename)
+        self.recent_receipts.insert(0, {"name": Path(filename).stem, "image": self.current_receipt.copy()})
+        self.recent_receipts = self.recent_receipts[:30]
+        self._refresh_recent_list()
         messagebox.showinfo(APP_TITLE, f"Saved:\n{filename}")
 
     def _render_scene_for_size(self, width: int, height: int) -> Image.Image:
